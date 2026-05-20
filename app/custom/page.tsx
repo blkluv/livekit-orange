@@ -1,6 +1,9 @@
-import { videoCodecs } from 'livekit-client';
+import { videoCodecs, VideoCodec } from 'livekit-client';
 import { VideoConferenceClientImpl } from './VideoConferenceClientImpl';
-import { isVideoCodec } from '@/lib/types';
+
+function isValidCodec(codec: string): codec is VideoCodec {
+  return videoCodecs.includes(codec as VideoCodec);
+}
 
 export default async function CustomRoomConnection(props: {
   searchParams: Promise<{
@@ -16,7 +19,7 @@ export default async function CustomRoomConnection(props: {
   if (typeof token !== 'string') {
     return <h2>Missing LiveKit token</h2>;
   }
-  if (codec !== undefined && !isVideoCodec(codec)) {
+  if (codec !== undefined && !isValidCodec(codec)) {
     return <h2>Invalid codec, if defined it has to be [{videoCodecs.join(', ')}].</h2>;
   }
 
