@@ -1,0 +1,324 @@
+'use client';
+
+import React, { useState } from 'react';
+import { decodePassphrase } from '@/lib/client-utils';
+import { DebugMode } from '@/lib/Debug';
+import { KeyboardShortcuts } from '@/lib/KeyboardShortcuts';
+import { RecordingIndicator } from '@/lib/RecordingIndicator';
+import { SettingsMenu } from '@/lib/SettingsMenu';
+import { ConnectionDetails } from '@/lib/types';
+import { encodePassphrase, randomString } from '@/lib/client-utils';
+import {
+  formatChatMessageLinks,
+  LocalUserChoices,
+  RoomContext,
+  VideoConference,
+} from '@livekit/components-react';
+import { CustomPreJoin } from '@/lib/CustomPreJoin';
+import { VideoConferenceClientImpl } from '@/lib/VideoConferenceClientImpl';
+import {
+  ExternalE2EEKeyProvider,
+  RoomOptions,
+  VideoCodec,
+  VideoPresets,
+  Room,
+  DeviceUnsupportedError,
+  RoomConnectOptions,
+  RoomEvent,
+  TrackPublishDefaults,
+  VideoCaptureOptions,
+} from 'livekit-client';
+import { useRouter } from 'next/navigation';
+import { useSetupE2EE } from '@/lib/useSetupE2EE';
+import { useLowCPUOptimizer } from '@/lib/usePerfomanceOptimiser';
+import styles from '@/styles/Room.module.css';
+
+const CONN_BACKEND_ENDPOINT = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
+const CONN_DETAILS_ENDPOINT =
+  process.env.NEXT_PUBLIC_CONN_DETAILS_ENDPOINT ?? '/api/connection-details';
+const SHOW_SETTINGS_MENU = process.env.NEXT_PUBLIC_SHOW_SETTINGS_MENU == 'true';
+
+export function PageClientImpl(props: {
+  roomName: string;
+  region?: string;
+  hq: boolean;
+  codec: VideoCodec;
+}) {
+  const [preJoinChoices, setPreJoinChoices] = React.useState<LocalUserChoices | undefined>(
+    undefined,
+  );
+  const preJoinDefaults = React.useMemo(() => {
+    return {
+      username: '',
+      videoEnabled: true,
+      audioEnabled: true,
+    };
+  }, []);
+  const [connectionDetails, setConnectionDetails] = React.useState<ConnectionDetails | undefined>(
+    undefined,
+  );
+  const [customServerDetails, setCustomServerDetails] = React.useState<{
+    liveKitUrl: string;
+    token: string;
+    codec?: VideoCodec;
+    userChoices: LocalUserChoices;
+  } | null>(null);
+
+  // Debug log for customServerDetails changes
+  React.useEffect(() => {
+    console.log('customServerDetails changed:', customServerDetails);
+  }, [customServerDetails]);
+  
+  const router = useRouter();
+  const [e2ee, setE2ee] = useState(false);
+  const [sharedPassphrase, setSharedPassphrase] = useState(randomString(64));
+
+  const handlePreJoinSubmit = React.useCallback(
+    async (values: LocalUserChoices, serverType: 'livekit' | 'custom') => {
+      setPreJoinChoices(values);
+
+      if (serverType === 'livekit') {
+        // LiveKit Server mode - gọi API route để tạo token
+        const livekitUrl =
+          process.env.NEXT_PUBLIC_LIVEKIT_URL || 'wss://voicecmd-5kh2prv1.livekit.cloud';
+
+        console.log('Environment variables:', {
+          NEXT_PUBLIC_LIVEKIT_URL: process.env.NEXT_PUBLIC_LIVEKIT_URL,
+          livekitUrl: livekitUrl,
+        });
+
+        if (!livekitUrl) {
+          alert('LIVEKIT_URL is not configured. Please check environment variables.');
+          return;
+        }
+
+        // Gọi API để tạo token từ LiveKit server
+        const url = new URL(CONN_DETAILS_ENDPOINT, CONN_BACKEND_ENDPOINT);
+        url.searchParams.append('roomName', props.roomName);
+        url.searchParams.append('participantName', values.username);
+        url.searchParams.append('serverType', 'livekit');
+        if (props.region) {
+          url.searchParams.append('region', props.region);
+        }
+
+        console.log('LiveKit Server - Calling API:', url.toString());
+        const connectionDetailsResp = await fetch(url.toString());
+        const connectionDetailsData = await connectionDetailsResp.json();
+        console.log('LiveKit Server - API Response:', connectionDetailsData);
+        setConnectionDetails(connectionDetailsData);
+      } else {
+        // Custom Server mode - sử dụng backend API của team
+        console.log('Custom Server - Calling API: http://livekit-token.ig3.ai/createToken');
+
+        // Use Next.js proxy to avoid CORS
+        const response = await fetch('/api/livekit-token/createToken', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            roomName: props.roomName, 
+            participantName: values.username
+          }),
+        });
+        if (!response.ok) throw new Error('Failed to fetch token');
+        const data = await response.json();
+        const serverUrl = data.server_url;
+        const token = data.participant_token;
+        if (!serverUrl || !token) throw new Error('Invalid response from token API');
+        
+        // Set custom server details instead of redirecting
+        console.log('Setting customServerDetails with:', { serverUrl, token, codec: props.codec, userChoices: values });
+        setCustomServerDetails({
+          liveKitUrl: serverUrl,
+          token: token,
+          codec: props.codec,
+          userChoices: values
+        });
+        
+        console.log('Custom server connected, using VideoConferenceClientImpl');
+        return true;
+      }
+    },
+    [],
+  );
+  const handlePreJoinError = React.useCallback((e: any) => console.error(e), []);
+
+  // Render custom VideoConference component if using custom server
+  if (customServerDetails) {
+    console.log('Rendering VideoConferenceClientImpl with:', customServerDetails);
+    return (
+      <main data-lk-theme="default" style={{ height: '100%' }}>
+        <VideoConferenceClientImpl
+          liveKitUrl={customServerDetails.liveKitUrl}
+          token={customServerDetails.token}
+          codec={customServerDetails.codec}
+          userChoices={customServerDetails.userChoices}
+        />
+      </main>
+    );
+  }
+
+  return (
+    <main className={styles.rpMain} data-lk-theme="default">
+      <div className={styles.rpBackgroundImage}></div>
+
+      {/* Content */}
+      <div className={styles.rpContent}>
+        {connectionDetails === undefined || preJoinChoices === undefined ? (
+          <CustomPreJoin
+            defaults={preJoinDefaults}
+            onSubmit={handlePreJoinSubmit}
+            onError={handlePreJoinError}
+          />
+        ) : (
+          <VideoConferenceComponent
+            connectionDetails={connectionDetails}
+            userChoices={preJoinChoices}
+            options={{ codec: props.codec, hq: props.hq }}
+          />
+        )}
+      </div>
+    </main>
+  );
+}
+
+function VideoConferenceComponent(props: {
+  userChoices: LocalUserChoices;
+  connectionDetails: ConnectionDetails;
+  options: {
+    hq: boolean;
+    codec: VideoCodec;
+  };
+}) {
+  const keyProvider = new ExternalE2EEKeyProvider();
+  const { worker, e2eePassphrase } = useSetupE2EE();
+  const e2eeEnabled = !!(e2eePassphrase && worker);
+
+  const [e2eeSetupComplete, setE2eeSetupComplete] = React.useState(false);
+
+  const roomOptions = React.useMemo((): RoomOptions => {
+    let videoCodec: VideoCodec | undefined = props.options.codec ? props.options.codec : 'vp9';
+    if (e2eeEnabled && (videoCodec === 'av1' || videoCodec === 'vp9')) {
+      videoCodec = undefined;
+    }
+    const videoCaptureDefaults: VideoCaptureOptions = {
+      deviceId: props.userChoices.videoDeviceId ?? undefined,
+      resolution: props.options.hq ? VideoPresets.h2160 : VideoPresets.h720,
+    };
+    const publishDefaults: TrackPublishDefaults = {
+      dtx: false,
+      videoSimulcastLayers: props.options.hq
+        ? [VideoPresets.h1080, VideoPresets.h720]
+        : [VideoPresets.h540, VideoPresets.h216],
+      red: !e2eeEnabled,
+      videoCodec,
+    };
+    return {
+      videoCaptureDefaults: videoCaptureDefaults,
+      publishDefaults: publishDefaults,
+      audioCaptureDefaults: {
+        deviceId: props.userChoices.audioDeviceId ?? undefined,
+      },
+      adaptiveStream: true,
+      dynacast: true,
+      e2ee: keyProvider && worker && e2eeEnabled ? { keyProvider, worker } : undefined,
+    };
+  }, [props.userChoices, props.options.hq, props.options.codec]);
+
+  const room = React.useMemo(() => new Room(roomOptions), []);
+
+  React.useEffect(() => {
+    if (e2eeEnabled) {
+      keyProvider
+        .setKey(decodePassphrase(e2eePassphrase))
+        .then(() => {
+          room.setE2EEEnabled(true).catch((e) => {
+            if (e instanceof DeviceUnsupportedError) {
+              alert(
+                `You're trying to join an encrypted meeting, but your browser does not support it. Please update it to the latest version and try again.`,
+              );
+              console.error(e);
+            } else {
+              throw e;
+            }
+          });
+        })
+        .then(() => setE2eeSetupComplete(true));
+    } else {
+      setE2eeSetupComplete(true);
+    }
+  }, [e2eeEnabled, room, e2eePassphrase]);
+
+  const connectOptions = React.useMemo((): RoomConnectOptions => {
+    return {
+      autoSubscribe: true,
+    };
+  }, []);
+
+  React.useEffect(() => {
+    room.on(RoomEvent.Disconnected, handleOnLeave);
+    room.on(RoomEvent.EncryptionError, handleEncryptionError);
+    room.on(RoomEvent.MediaDevicesError, handleError);
+
+    if (e2eeSetupComplete) {
+      room
+        .connect(
+          props.connectionDetails.serverUrl,
+          props.connectionDetails.participantToken,
+          connectOptions,
+        )
+        .catch((error) => {
+          handleError(error);
+        });
+      if (props.userChoices.videoEnabled) {
+        room.localParticipant.setCameraEnabled(true).catch((error) => {
+          handleError(error);
+        });
+      }
+      if (props.userChoices.audioEnabled) {
+        room.localParticipant.setMicrophoneEnabled(true).catch((error) => {
+          handleError(error);
+        });
+      }
+    }
+    return () => {
+      room.off(RoomEvent.Disconnected, handleOnLeave);
+      room.off(RoomEvent.EncryptionError, handleEncryptionError);
+      room.off(RoomEvent.MediaDevicesError, handleError);
+    };
+  }, [e2eeSetupComplete, room, props.connectionDetails, props.userChoices]);
+
+  const lowPowerMode = useLowCPUOptimizer(room);
+
+  const router = useRouter();
+  const handleOnLeave = React.useCallback(() => router.push('/'), [router]);
+  const handleError = React.useCallback((error: Error) => {
+    console.error(error);
+    alert(`Encountered an unexpected error, check the console logs for details: ${error.message}`);
+  }, []);
+  const handleEncryptionError = React.useCallback((error: Error) => {
+    console.error(error);
+    alert(
+      `Encountered an unexpected encryption error, check the console logs for details: ${error.message}`,
+    );
+  }, []);
+
+  React.useEffect(() => {
+    if (lowPowerMode) {
+      console.warn('Low power mode enabled');
+    }
+  }, [lowPowerMode]);
+
+  return (
+    <div className="lk-room-container">
+      <RoomContext.Provider value={room}>
+        <KeyboardShortcuts />
+        <VideoConference
+          chatMessageFormatter={formatChatMessageLinks}
+          SettingsComponent={SHOW_SETTINGS_MENU ? SettingsMenu : undefined}
+        />
+        <DebugMode />
+        <RecordingIndicator />
+      </RoomContext.Provider>
+    </div>
+  );
+}
