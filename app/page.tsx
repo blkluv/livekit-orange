@@ -53,7 +53,8 @@ function DemoMeetingTab(props: { label: string }) {
     }
   };
   return (
-    <div className={styles.tabContent}>Gifting livestream shows</p>
+    <div className={styles.tabContent}>
+      <p>Gifting livestream shows</p>
       <button
         style={{ marginTop: '1rem', marginBottom: '1rem' }}
         className="lk-button"
